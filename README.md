@@ -1,2 +1,3 @@
 # Api-store
-store / tienda BackEnd Django 
+
+API REST store full flask, SQLalchemy
