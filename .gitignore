@@ -1,2 +1,4 @@
 .venv
 .vscode
+static
+store.db

@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, current_app
 from flask_sqlalchemy import SQLAlchemy
 from flask_restx import Api, Resource, fields, abort, reqparse
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -17,16 +17,10 @@ if 'SECRET_KEY' not in app.config:
     app.config['SECRET_KEY'] = 'tu_valor_por_defecto'
 
 api = Api(app, version='1.0', title='APIREST store')
-#
-
 admin = api.namespace('admin', description='End Ponit Admin')
 products_namespace = api.namespace('products', description='Operaciones relacionadas con productos')
 user = api.namespace('user', description='Operaciones de edición de usuario')
-
-#
 db = SQLAlchemy(app)
-
-todos = {}
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -42,11 +36,40 @@ class User(db.Model):
     is_admin = db.Column(db.Boolean, default=False)
     purchase_count = db.Column(db.Integer, default=0)
     cart = db.relationship('ShoppingCart', backref='user', lazy=True)
-
+    profile_picture = db.Column(db.String(255))
 
     def view_cart(self):
         return self.cart.view_cart()
     
+    def save_profile_picture(self, picture):
+        if picture:
+            picture_filename = f"user_{self.id}_profile_picture.jpg"
+            picture_path = os.path.join(current_app.root_path, 'static/profile_pictures', picture_filename)
+
+            os.makedirs(os.path.dirname(picture_path), exist_ok=True)
+
+            picture.save(picture_path)
+            self.profile_picture = f"profile_pictures/{picture_filename}"
+            db.session.commit()
+
+    def get_profile_picture_url(self):
+        if self.profile_picture:
+            return f"{request.url_root}static/{self.profile_picture}"
+        else:
+            return None
+
+def create_default_admin():
+    default_admin_username = 'admin'
+    default_admin_password = 'admin'
+
+    existing_admin = User.query.filter_by(username=default_admin_username).first()
+    if not existing_admin:
+        hashed_password = generate_password_hash(default_admin_password)
+        new_admin = User(username=default_admin_username, password_hash=hashed_password, is_admin=True)
+        db.session.add(new_admin)
+        db.session.commit()
+
+
 #jwt
 
 def generate_token(user_data):
@@ -97,7 +120,21 @@ class Product(db.Model):
     model = db.Column(db.String(50), nullable=True)  
     origin = db.Column(db.String(50), nullable=True)  
     description = db.Column(db.Text, nullable=True)  
+    product_image = db.Column(db.String(255))  # Almacena la ruta de la imagen en la base de datos
 
+    def save_product_image(self, image):
+        if image:
+            image_filename = f"product_{self.id}_image.jpg"
+            image_path = os.path.join(current_app.root_path, 'static/product_images', image_filename)
+            image.save(image_path)
+            self.product_image = f"product_images/{image_filename}"
+            db.session.commit()
+
+    def get_product_image_url(self):
+        if self.product_image:
+            return f"{request.url_root}static/{self.product_image}"
+        else:
+            return None
 
 class CartItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -127,28 +164,7 @@ class ShoppingCart(db.Model): #carro de Compra
         return cart_info
 
 #rutas
-@admin.route('/register')
-class Register(Resource):
-    def put(self):
-        data = request.get_json()
-        
-        username = data.get('username')
-        password = data.get('password')
-        #
-        is_admin = True
-        resp = existing_user(username)
-        
-        if resp is None:
-            hashed_password = generate_password_hash(password)
-            new_user = User(username=username, password_hash=hashed_password, is_admin=is_admin)
-            db.session.add(new_user)
-            db.session.commit()
-            #token
-            return {'message': 'Registro completado'}
-        else:
-            return {'message': 'El Usuario Ya existe'}
-        
-        
+#test
 @user.route('/register')
 class Register(Resource):
     def put(self):
@@ -171,8 +187,10 @@ class Register(Resource):
             return {'message': 'El Usuario Ya existe'}
                 
 
+
 #Login Admin
-@admin.route('/login')
+#test
+@user.route('/login')
 class Login(Resource):
     def put(self):
         data = request.get_json()
@@ -188,7 +206,8 @@ class Login(Resource):
         else:
             return jsonify({'messeger':'Datos No Validos'})
 
-@admin.route('/edit')
+
+
 @user.route('/edit')
 class Edit(Resource):
     @api.doc(security='apikey')
@@ -196,60 +215,66 @@ class Edit(Resource):
         auth_header = request.headers.get('Authorization')
 
         if not auth_header:
-            print('Token de autorización no proporcionado')
             return jsonify({'message': 'Token de autorización no proporcionado'}), 401
 
         token_parts = auth_header.split()
         if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-            print('Formato de token inválido')
             return jsonify({'message': 'Formato de token inválido'}), 401
 
         token = token_parts[1]
-        print('Token:', token)
 
         try:
             payload = jwt.decode(token, key, algorithms='HS256')
-
             user_id = payload.get('id')
-            username = payload.get('username')
-            email = payload.get('email')
-
-            print('User ID:', user_id)
-            print('Username:', username)
-            print('Email:', email)
 
             user = User.query.filter_by(id=user_id).first()
 
             if user:
-                request_data = request.get_json()
+                # Acceder a los campos del formulario
+                if 'username' in request.form:
+                    user.username = request.form['username']
 
-                print('Datos de la solicitud:', request_data)
+                if 'firstname' in request.form:
+                    user.firstname = request.form['firstname']
 
-                if 'username' in request_data:
-                    user.username = request_data['username']
-                if 'firstname' in request_data:
-                    user.firstname = request_data['firstname']
-                if 'lastname' in request_data:
-                    user.lastname = request_data['lastname']
-                if 'age' in request_data:
-                    user.age = request_data['age']
+                if 'lastname' in request.form:
+                    user.lastname = request.form['lastname']
+
+                if 'age' in request.form:
+                    user.age = request.form['age']
+
+                if 'dni' in request.form:
+                    user.dni = request.form['dni']
+
+                if 'address' in request.form:
+                    user.address = request.form['address']
+
+                if 'phone' in request.form:
+                    user.phone = request.form['phone']
+
+                if 'email' in request.form:
+                    user.email = request.form['email']
+
+                if 'password' in request.form:
+                    password = request.form['password']
+                    user.password_hash = generate_password_hash(password)
+
+                # Manejar la foto de perfil si se proporciona
+                if 'profile_picture' in request.files:
+                    user.save_profile_picture(request.files['profile_picture'])
 
                 db.session.commit()
 
-                print('Datos actualizados exitosamente')
                 return jsonify({'message': 'Datos actualizados exitosamente'})
 
             else:
-                print('Datos no válidos')
                 return jsonify({'message': 'Datos no válidos'}), 401
 
         except jwt.ExpiredSignatureError:
-            print('Token expirado, inicie sesión nuevamente')
             return jsonify({'message': 'Token expirado, inicie sesión nuevamente'}), 401
         except jwt.InvalidTokenError:
-            print('Token inválido')
             return jsonify({'message': 'Token inválido'}), 401
-
+        
 
 @admin.route('/products')
 @user.route('/products')
@@ -609,4 +634,5 @@ def remove_from_cart():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+        create_default_admin()
     app.run(debug=True, port=0)
