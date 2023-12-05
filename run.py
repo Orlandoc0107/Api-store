@@ -111,7 +111,7 @@ def validate_login(username, password):
 class Product(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
-    price = db.Column(db.Float, nullable=False)
+    price = db.Column(db.Float, nullable=True)
     code = db.Column(db.Integer, nullable=True)  
     is_available = db.Column(db.Boolean, default=False) #disponible
     quantity = db.Column(db.Integer, nullable=True) #cantidad
@@ -123,18 +123,28 @@ class Product(db.Model):
     product_image = db.Column(db.String(255))  # Almacena la ruta de la imagen en la base de datos
 
     def save_product_image(self, image):
-        if image:
-            image_filename = f"product_{self.id}_image.jpg"
-            image_path = os.path.join(current_app.root_path, 'static/product_images', image_filename)
-            image.save(image_path)
-            self.product_image = f"product_images/{image_filename}"
-            db.session.commit()
+        try:
+            if image:
+                image_filename = f"product_{self.id}_image.jpg"
+                image_path = os.path.join(current_app.root_path, 'static/product_images', image_filename)
 
-    def get_product_image_url(self):
-        if self.product_image:
-            return f"{request.url_root}static/{self.product_image}"
-        else:
-            return None
+                os.makedirs(os.path.dirname(image_path), exist_ok=True)
+
+                image.save(image_path)
+                self.product_image = f"product_images/{image_filename}"
+
+                with db.session.begin_nested():
+                    db.session.commit()
+
+                return {'success': True, 'message': 'Imagen del producto guardada exitosamente'}
+        except Exception as e:
+            print(f"Error al guardar la imagen del producto: {e}")
+            return {'success': False, 'error': f"Error al guardar la imagen del producto: {e}"}
+
+
+def product_exists(product_name):
+    existing_product = Product.query.filter_by(name=product_name).first()
+    return existing_product is not None
 
 class CartItem(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -207,7 +217,7 @@ class Login(Resource):
             return jsonify({'messeger':'Datos No Validos'})
 
 
-
+#test
 @user.route('/edit')
 class Edit(Resource):
     @api.doc(security='apikey')
@@ -276,7 +286,72 @@ class Edit(Resource):
             return jsonify({'message': 'Token inválido'}), 401
         
 
-@admin.route('/products')
+#test
+@admin.route('/add_product')
+class AddProduct(Resource):
+    @api.doc(security='apikey')
+    def post(self):
+        auth_header = request.headers.get('Authorization')
+        
+        if not auth_header:
+            return {'message': 'Token de autorización no proporcionado'}, 401
+
+        token_parts = auth_header.split()
+        if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+            return {'message': 'Formato de token inválido'}, 401
+
+        token = token_parts[1]
+        print('Token:', token)
+
+        try:
+            payload = jwt.decode(token, key, algorithms='HS256')
+
+            is_admin = payload.get('is_admin')
+
+            if is_admin:
+                product_name = request.form.get('name')
+
+                # Validación de campos
+                if not product_name:
+                    return {'message': 'El campo "name" es requerido'}, 400
+
+                # Verificar si el producto ya existe por el nombre
+                resp = product_exists(product_name)
+                if resp:
+                    return resp
+
+                new_product = Product(
+                    name=product_name,
+                    price=request.form.get('price'),
+                    code=request.form.get('code'),
+                    is_available=request.form.get('is_available', False),
+                    quantity=request.form.get('quantity'),
+                    on_sale=request.form.get('on_sale', False),
+                    brand=request.form.get('brand'),
+                    model=request.form.get('model'),
+                    origin=request.form.get('origin'),
+                    description=request.form.get('description')
+                )
+
+                db.session.add(new_product)
+                
+                # Manejar la foto del producto si se proporciona
+                if 'product_image' in request.files:
+                    new_product.save_product_image(request.files['product_image'])
+                    
+                db.session.commit()
+
+                return {'message': 'Producto agregado exitosamente'}
+            
+            else:
+                return {'error': 'Usuario no autorizado para agregar productos'}, 403
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+#
+
 @user.route('/products')
 class ProductList(Resource):
     def get(self):
@@ -304,68 +379,6 @@ class ProductList(Resource):
         return jsonify(products_list)
     
 ###
-@admin.route('/add_product')
-class AddProduct(Resource):
-    @api.doc(security='apikey')
-    def post(self):
-        auth_header = request.headers.get('Authorization')
-        
-        if not auth_header:
-            print('Token de autorización no proporcionado')
-            return jsonify({'message': 'Token de autorización no proporcionado'}), 401
-
-        token_parts = auth_header.split()
-        if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-            print('Formato de token inválido')
-            return jsonify({'message': 'Formato de token inválido'}), 401
-
-        token = token_parts[1]
-        print('Token:', token)
-
-        try:
-            payload = jwt.decode(token, key, algorithms='HS256')
-
-            is_admin = payload.get('is_admin')
-            id = payload.get('id')
-            print('Admin:', is_admin)
-            print(id)
-            if is_admin == True:
-                
-                request_data = request.get_json()
-
-                print('Datos del producto:', request_data)
-
-                # Crear un nuevo producto y guardarlo en la base de datos
-                new_product = Product(
-                    name=request_data.get('name'),
-                    price=request_data.get('price'),
-                    code=request_data.get('code'),
-                    is_available=request_data.get('is_available', False),
-                    quantity=request_data.get('quantity'),
-                    on_sale=request_data.get('on_sale', False),
-                    brand=request_data.get('brand'),
-                    model=request_data.get('model'),
-                    origin=request_data.get('origin'),
-                    description=request_data.get('description')
-                )
-
-                db.session.add(new_product)
-                db.session.commit()
-
-                print('Producto agregado exitosamente')
-                return jsonify({'message': 'Producto agregado exitosamente'})
-
-            else:
-                print('Usuario no autorizado para agregar productos')
-                return jsonify({'message': 'Usuario no autorizado para agregar productos'}), 403
-
-        except jwt.ExpiredSignatureError:
-            print('Token expirado, inicie sesión nuevamente')
-            return jsonify({'message': 'Token expirado, inicie sesión nuevamente'}), 401
-        except jwt.InvalidTokenError:
-            print('Token inválido')
-            return jsonify({'message': 'Token inválido'}), 401
-        
 
 ####
 
