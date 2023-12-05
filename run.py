@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, current_app
+from flask import Flask, request, jsonify, current_app, url_for
 from flask_sqlalchemy import SQLAlchemy
 from flask_restx import Api, Resource, fields, abort, reqparse
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -141,6 +141,10 @@ class Product(db.Model):
             print(f"Error al guardar la imagen del producto: {e}")
             return {'success': False, 'error': f"Error al guardar la imagen del producto: {e}"}
 
+    def get_product_image_url(self):
+        if self.product_image:
+            return url_for('static', filename=self.product_image, _external=True)
+        return None
 
 def product_exists(product_name):
     existing_product = Product.query.filter_by(name=product_name).first()
@@ -318,7 +322,7 @@ class AddProduct(Resource):
                 # Verificar si el producto ya existe por el nombre
                 resp = product_exists(product_name)
                 if resp:
-                    return resp
+                    return {'message':'El producto ya existe'}
 
                 new_product = Product(
                     name=product_name,
@@ -350,8 +354,8 @@ class AddProduct(Resource):
             return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
         except jwt.InvalidTokenError:
             return {'message': 'Token inválido'}, 401
-#
 
+#test
 @user.route('/products')
 class ProductList(Resource):
     def get(self):
@@ -371,13 +375,13 @@ class ProductList(Resource):
                 'brand': product.brand,
                 'model': product.model,
                 'origin': product.origin,
-                'description': product.description
+                'description': product.description,
+                'product_image_url': product.get_product_image_url()  # Agrega la URL de la imagen
             }
             for product in products
         ]
 
         return jsonify(products_list)
-    
 ###
 
 ####
