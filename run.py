@@ -35,8 +35,8 @@ class User(db.Model):
     password_hash = db.Column(db.String(128), nullable=False)
     is_admin = db.Column(db.Boolean, default=False)
     purchase_count = db.Column(db.Integer, default=0)
-    cart = db.relationship('ShoppingCart', backref='user', lazy=True)
     profile_picture = db.Column(db.String(255))
+    cart = db.relationship('ShoppingCart', backref='user', lazy=True, cascade='all, delete-orphan')
 
     def view_cart(self):
         return self.cart.view_cart()
@@ -155,27 +155,64 @@ class CartItem(db.Model):
     shopping_cart_id = db.Column(db.Integer, db.ForeignKey('shopping_cart.id'), nullable=False)
     product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
     quantity = db.Column(db.Integer, nullable=False)
-    
+    product = db.relationship('Product', backref='cart_items')  # Añadido
 
-class ShoppingCart(db.Model): #carro de Compra
+class ShoppingCart(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=True)
     items = db.relationship('CartItem', backref='shopping_cart', lazy=True)
-#agregar productos
+    
     def add_item(self, product, quantity=1):
         cart_item = CartItem(product=product, quantity=quantity)
         self.items.append(cart_item)
-#remover productos
-    def remove_item(self, product):
-        cart_item = CartItem.query.filter_by(shopping_cart_id=self.id, product_id=product.id).first()
-        if cart_item:
-            db.session.delete(cart_item)
-            db.session.commit()
+        db.session.add(cart_item)  # Añadido
+        db.session.commit()  # Añadido
+
+    def remove_item(self, product, quantity=1):
+        try:
+            db.session.begin()  # Inicia la transacción
+
+            cart_item = CartItem.query.filter_by(shopping_cart_id=self.id, product_id=product.id).first()
+
+            if cart_item:
+                if cart_item.quantity > quantity:
+                    cart_item.quantity -= quantity
+                else:
+                    db.session.delete(cart_item)
+
+            # Actualiza la cantidad en la lista de productos
+                product.quantity += quantity
+
+            db.session.commit()  # Completa la transacción
+
+        except Exception as e:
+            db.session.rollback()  # Deshace la transacción en caso de error
+            raise e
+            
+    def calculate_total(self):
+        total = 0
+        for cart_item in self.items:
+            total += cart_item.product.price * cart_item.quantity
+        return total
+    
+    def calculate_total_quantity(self):
+        total_quantity = sum(item.quantity for item in self.items)
+        return total_quantity
+
+    def calculate_total_price(self):
+        total_price = sum(item.product.price * item.quantity for item in self.items)
+        return total_price
+
     def view_cart(self):
         cart_info = ""
         for item in self.items:
             cart_info += f"{item.product.name} - Cantidad: {item.quantity}, Precio: ${item.product.price}\n"
         return cart_info
+
+    def clear_cart(self):
+        for item in self.items:
+            db.session.delete(item)
+        db.session.commit()
 
 #rutas
 #test
@@ -383,9 +420,7 @@ class ProductList(Resource):
 
         return jsonify(products_list)
 ###
-
-####
-
+#test
 @admin.route('/edit_product')
 class EditProduct(Resource):
     @api.doc(security='apikey')
@@ -408,11 +443,11 @@ class EditProduct(Resource):
         auth_header = args['Authorization']
 
         if not auth_header:
-            return jsonify({'message': 'Token de autorización no proporcionado'}), 401
+            return {'message': 'Token de autorización no proporcionado'}, 401
 
         token_parts = auth_header.split()
         if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-            return jsonify({'message': 'Formato de token inválido'}), 401
+            return {'message': 'Formato de token inválido'}, 401
 
         token = token_parts[1]
 
@@ -426,9 +461,8 @@ class EditProduct(Resource):
                 product = Product.query.get(product_id)
 
                 if not product:
-                    return jsonify({'message': 'Producto no encontrado'}), 404
+                    return {'message': 'Producto no encontrado'}, 404
 
-                # Actualizar solo los campos proporcionados
                 if args.get('name') is not None:
                     product.name = args['name']
                 if args.get('price') is not None:
@@ -449,10 +483,18 @@ class EditProduct(Resource):
                     product.origin = args['origin']
                 if args.get('description') is not None:
                     product.description = args['description']
+                    
+                if 'product_image' in request.files:
+                    if product.product_image:
+                        old_image_path = os.path.join(current_app.root_path, 'static', product.product_image)
+                        if os.path.exists(old_image_path):
+                            os.remove(old_image_path)
 
+                    new_image = request.files['product_image']
+                    product.save_product_image(new_image)
+                    
                 db.session.commit()
 
-                # Convertir manualmente el objeto de SQLAlchemy a un diccionario
                 updated_product = {
                     'id': product.id,
                     'name': product.name,
@@ -464,7 +506,8 @@ class EditProduct(Resource):
                     'brand': product.brand,
                     'model': product.model,
                     'origin': product.origin,
-                    'description': product.description
+                    'description': product.description,
+                    'product_image': product.get_product_image_url()
                 }
 
                 return jsonify({'message': 'Producto actualizado exitosamente', 'product': updated_product})
@@ -478,7 +521,7 @@ class EditProduct(Resource):
             return jsonify({'message': 'Token inválido'}), 401
 
 ####
-
+#test
 @admin.route('/delete_product')
 class DeleteProduct(Resource):
     @api.doc(security='apikey')
@@ -530,124 +573,435 @@ class DeleteProduct(Resource):
 class DeleteProduct(Resource):
     @api.doc(security='apikey')
     def post(self):
-        
-        parser = reqparse.RequestParser()
-        parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
-        parser.add_argument('product_id', type=int, required=True, help='ID del producto a eliminar')
-        args = parser.parse_args()
-
-        auth_header = args['Authorization']
-
-        if not auth_header:
-            return {'message': 'Token de autorización no proporcionado'}, 401
-
-        token_parts = auth_header.split()
-        if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-            return {'message': 'Formato de token inválido'}, 401
-
-        token = token_parts[1]
-
         try:
+            parser = reqparse.RequestParser()
+            parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
+            parser.add_argument('product_id', type=int, required=True, help='ID del producto a eliminar')
+            parser.add_argument('quantity', type=int, default=1, help='Cantidad del producto a agregar al carrito')
+            args = parser.parse_args()
+
+            auth_header = args['Authorization']
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
             payload = jwt.decode(token, key, algorithms='HS256')
 
             is_admin = payload.get('is_admin')
             user_id = payload.get('user_id')
-            
-            if not is_admin:  # Cambiado para verificar que no es un administrador
-                
-                data = request.get_json()
-                
-                product_id = data.get('product_id')
-                quantity = data.get('quantity', 1)
 
-                product = Product.query.get(product_id)
+            if is_admin:
+                return {'message': 'Usuario no autorizado para agregar productos al carrito'}, 403
 
-                if not product:
-                    return {'message': 'Producto no encontrado'}, 404
+            # Movemos la inicialización del carrito de compras aquí
+            shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()
 
-                if product.quantity < quantity:
-                    return {'message': 'Cantidad insuficiente en stock'}, 400
-                
-                shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()  # Usando user_id
+            if not shopping_cart:
+                shopping_cart = ShoppingCart(user_id=user_id)
+                print(shopping_cart)
+                print("creando carrito")
+                db.session.add(shopping_cart)
 
-                if not shopping_cart:
-                    shopping_cart = ShoppingCart(user_id=user_id)  # Usando user_id
-                    
-                    db.session.add(shopping_cart)
-                    
-                shopping_cart.add_item(product, quantity)
-                
-                product.quantity -= quantity
-                
-                user = User.query.get(user_id)
-                user.points += 1
-                
-                db.session.commit()
-                
-                return {'message': 'Producto agregado al carrito exitosamente', 'cart': shopping_cart.view_cart(), 'total': shopping_cart.calculate_total()}
+            data = request.get_json()
+            product_id = data.get('product_id')
+            quantity = int(data.get('quantity', 1))
 
-                
+            product = Product.query.get(product_id)
+
+            if not product:
+                return {'message': 'Producto no encontrado'}, 404
+
+            if product.quantity is not None and (product.quantity - quantity) < 0:
+                return {'message': 'Cantidad insuficiente en stock'}, 400
+
+            # Verifica la lógica específica de tu aplicación para manejar la cantidad
+            # E.g., si deseas decrementar la cantidad en la base de datos, hazlo aquí
+
+            shopping_cart.add_item(product, quantity)
+
+            db.session.commit()
+
+            return {
+                'message': 'Producto agregado al carrito exitosamente',
+                'cart': {
+                    'total_quantity': shopping_cart.calculate_total_quantity(),
+                    'total_price': shopping_cart.calculate_total_price(),
+                    'items': shopping_cart.view_cart()
+                }
+            }
+
         except jwt.ExpiredSignatureError:
             return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
         except jwt.InvalidTokenError:
             return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
 
-###
 
-
-@app.route('/remove_from_cart', methods=['POST'])
-def remove_from_cart():
-        parser = reqparse.RequestParser()
-        parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
-        parser.add_argument('product_id', type=int, required=True, help='ID del producto a eliminar')
-        args = parser.parse_args()
-
-        auth_header = args['Authorization']
-
-        if not auth_header:
-            return {'message': 'Token de autorización no proporcionado'}, 401
-
-        token_parts = auth_header.split()
-        if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-            return {'message': 'Formato de token inválido'}, 401
-
-        token = token_parts[1]
-
+#test
+@user.route('/remove_cart')
+class Remove(Resource):
+    @api.doc(security='apikey')
+    def post(self):
         try:
+            parser = reqparse.RequestParser()
+            parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
+            parser.add_argument('product_id', type=int, required=True, help='ID del producto a eliminar')
+            parser.add_argument('quantity', type=int, default=1, help='Cantidad del producto a eliminar del carrito')
+            args = parser.parse_args()
+
+            auth_header = args['Authorization']
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
             payload = jwt.decode(token, key, algorithms='HS256')
 
             is_admin = payload.get('is_admin')
             user_id = payload.get('user_id')
+
+            if is_admin:
+                return {'message': 'Usuario no autorizado para eliminar productos del carrito'}, 403
+
+            product_id = args.get('product_id')
+            quantity = args.get('quantity')
+
+            product = Product.query.get(product_id)
+
+            if not product:
+                return {'message': 'Producto no encontrado'}, 404
+
+            shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()
+
+            if not shopping_cart:
+                return {'message': 'Carrito no encontrado'}, 404
+
+            shopping_cart.remove_item(product, quantity)
             
-            if not is_admin:  # Cambiado para verificar que no es un administrador
-                
-                data = request.get_json()
+            product.quantity += quantity
 
-                product_id = data.get('product_id')
-                quantity = data.get('quantity', 1) 
+            db.session.commit()
 
-                product = Product.query.get(product_id)
+            return {'message': 'Producto eliminado del carrito exitosamente', 'cart': shopping_cart.view_cart(), 'total': shopping_cart.calculate_total()}
 
-                if not product:
-                    return {'message': 'Producto no encontrado'}, 404
-
-
-                shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()
-
-                if not shopping_cart:
-                    return {'message': 'Carrito no encontrado'}, 404
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
 
 
-                shopping_cart.remove_item(product)
+#
+ #test       
+@user.route('/finalize_purchase')
+class Finalize(Resource):
+    @api.doc(security='apikey')
+    def post(self):
+        try:
+            parser = reqparse.RequestParser()
+            parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
+            args = parser.parse_args()
 
-                product.quantity += quantity
+            auth_header = args['Authorization']
 
-                db.session.commit()
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
 
-                return {'message': 'Producto eliminado del carrito exitosamente', 'cart': shopping_cart.view_cart(), 'total': shopping_cart.calculate_total()}
-        except:
-            return {'message':'Error'}
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+
+            is_admin = payload.get('is_admin')
+            user_id = payload.get('user_id')
+
+            if is_admin:
+                return {'message': 'Usuario no autorizado para finalizar la compra'}, 403
+
+            shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()
+
+            if not shopping_cart:
+                return {'message': 'Carrito no encontrado'}, 404
+
+        # Aquí puedes agregar la lógica para finalizar la compra
+        # Por ejemplo, verificar si los productos aún están disponibles, restar cantidades, etc.
+
+            for item in shopping_cart.items:
+                product = item.product
+                if product.quantity is not None and item.quantity > product.quantity:
+                    return {'message': f'Cantidad insuficiente en stock para el producto: {product.name}'}, 400
+
+            # Realiza la operación para restar la cantidad de productos comprados
+                product.quantity -= item.quantity
+
+        # Limpia el carrito después de completar la compra
+            shopping_cart.clear_cart()
+
+            db.session.commit()
+
+            return {'message': 'Compra finalizada exitosamente', 'cart': shopping_cart.view_cart()}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+
 ####
+
+#test
+@user.route('/view_cart')
+class ViewCart(Resource):
+    @api.doc(security='apikey')
+    def get(self):
+        try:
+            parser = reqparse.RequestParser()
+            parser.add_argument('Authorization', type=str, location='headers', required=True, help='Token de autorización (Bearer Token)')
+            args = parser.parse_args()
+
+            auth_header = args['Authorization']
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+
+            is_admin = payload.get('is_admin')
+            user_id = payload.get('user_id')
+
+            if is_admin:
+                return {'message': 'Usuario no autorizado para ver el carrito de compras'}, 403
+
+            shopping_cart = ShoppingCart.query.filter_by(user_id=user_id).first()
+
+            if not shopping_cart:
+                return {'message': 'Carrito no encontrado'}, 404
+
+            return {'cart': shopping_cart.view_cart(), 'total': shopping_cart.calculate_total()}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+        
+        #
+
+#test
+@admin.route('/view_all_users')
+class ViewAllUsers(Resource):
+    @api.doc(security='apikey')
+    def get(self):
+        try:
+            auth_header = request.headers.get('Authorization')
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+            is_admin = payload.get('is_admin')
+
+            if not is_admin:
+                return {'message': 'Usuario no autorizado para ver todos los usuarios'}, 403
+
+            users = User.query.all()
+            user_list = []
+
+            for user in users:
+                user_data = {
+                    'id': user.id,
+                    'username': user.username,
+                    'firstname': user.firstname,
+                    'lastname': user.lastname,
+                    'age': user.age,
+                    'dni': user.dni,
+                    'address': user.address,
+                    'phone': user.phone,
+                    'email': user.email,
+                    'is_admin': user.is_admin,
+                    'profile_picture': user.get_profile_picture_url()
+                }
+                user_list.append(user_data)
+
+            return {'users': user_list}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+
+#test
+@admin.route('/view_user/<int:user_id>')
+class ViewUser(Resource):
+    @api.doc(security='apikey')
+    def get(self, user_id):
+        try:
+            auth_header = request.headers.get('Authorization')
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+            is_admin = payload.get('is_admin')
+
+            if not is_admin:
+                return {'message': 'Usuario no autorizado para ver o modificar un usuario específico'}, 403
+
+            user = User.query.get(user_id)
+
+            if not user:
+                return {'message': 'Usuario no encontrado'}, 404
+
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'firstname': user.firstname,
+                'lastname': user.lastname,
+                'age': user.age,
+                'dni': user.dni,
+                'address': user.address,
+                'phone': user.phone,
+                'email': user.email,
+                'is_admin': user.is_admin,
+                'profile_picture': user.get_profile_picture_url()
+            }
+
+            return {'user': user_data}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+
+    @api.doc(security='apikey')
+    def put(self, user_id):
+        try:
+            auth_header = request.headers.get('Authorization')
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+            is_admin = payload.get('is_admin')
+
+            if not is_admin:
+                return {'message': 'Usuario no autorizado para modificar un usuario específico'}, 403
+
+            user = User.query.get(user_id)
+
+            if not user:
+                return {'message': 'Usuario no encontrado'}, 404
+
+            # Acceder a los campos del formulario
+            if 'is_admin' in request.form:
+                user.is_admin = request.form['is_admin']
+
+            if 'delete_user' in request.form and request.form['delete_user'] == 'true':
+                db.session.delete(user)
+
+            db.session.commit()
+
+            return {'message': 'Datos actualizados exitosamente'}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+
+#test
+@admin.route('/edit_user/<int:user_id>')
+class EditUser(Resource):
+    @api.doc(security='apikey')
+    def put(self, user_id):
+        try:
+            auth_header = request.headers.get('Authorization')
+
+            if not auth_header:
+                return {'message': 'Token de autorización no proporcionado'}, 401
+
+            token_parts = auth_header.split()
+            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+                return {'message': 'Formato de token inválido'}, 401
+
+            token = token_parts[1]
+
+            payload = jwt.decode(token, key, algorithms='HS256')
+            is_admin = payload.get('is_admin')
+
+            if not is_admin:
+                return {'message': 'Usuario no autorizado para modificar un usuario específico'}, 403
+
+            user = User.query.get(user_id)
+
+            if not user:
+                return {'message': 'Usuario no encontrado'}, 404
+
+            # Acceder a los campos del formulario
+            if 'is_admin' in request.form:
+                user.is_admin = request.form['is_admin']
+
+            if 'delete_user' in request.form and request.form['delete_user'] == 'true':
+                db.session.delete(user)
+
+            db.session.commit()
+
+            return {'message': 'Datos actualizados exitosamente'}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
+
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
