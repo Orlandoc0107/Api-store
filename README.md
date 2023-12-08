@@ -1,6 +1,11 @@
 # Api-store
 
-API REST store full flask, SQLalchemy
+Actualizaciones:
+se agrego un endpoint para ver los datos personales 
+con Autorizacion jwt
+
+
+API REST store full flask, SQLalchemy, pyjwt
 
 ## Instalación
 
@@ -11,13 +16,19 @@ API REST store full flask, SQLalchemy
    cd Api-store
    ```
 
-virtualenv venv
+python -m venv .venv
+
+. .venv/bin/activate
+
 source venv/bin/activate  # Linux/Mac
 # o
 .\venv\Scripts\activate  # Windows
 
 pip install -r requirements.txt
 
+en caso de modificacion.
+para actualizacion los requirements:
+pip freeze > requirements.txt
 
 export SECRET_KEY='tu_clave_secreta'
 export DATABASE_URL='tu_cadena_de_conexion_bd'

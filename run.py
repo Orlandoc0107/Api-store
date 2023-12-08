@@ -4,8 +4,10 @@ from flask_restx import Api, Resource, fields, abort, reqparse
 from werkzeug.security import check_password_hash, generate_password_hash
 import jwt
 import os
+#from flask_cors import CORS
 
 app = Flask(__name__)
+#CORS(app, resources={r"/*": {"origins": "*"}})
 base_dir = os.path.abspath(os.path.dirname(__file__))
 SECRET_KEY = 'a9f4f7d967d9a80deb795d58161216270692b50c1d1710c48d11011a123dc458'
 key = SECRET_KEY
@@ -16,7 +18,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 if 'SECRET_KEY' not in app.config:
     app.config['SECRET_KEY'] = 'tu_valor_por_defecto'
 
-api = Api(app, version='1.0', title='APIREST store')
+api = Api(app, version='1.0.1', title='APIREST store')
 admin = api.namespace('admin', description='End Ponit Admin')
 products_namespace = api.namespace('products', description='Operaciones relacionadas con productos')
 user = api.namespace('user', description='Operaciones de edición de usuario')
@@ -79,9 +81,8 @@ def generate_token(user_data):
         'email': user_data.get('email'),
         'is_admin': user_data.get('is_admin')
     }
-    jwt_token = jwt.encode(payload, key, algorithm='HS256')
+    return jwt.encode(payload, key, algorithm='HS256')
     
-    return jwt_token
 
 #buscar si existe el usuario
 def existing_user(username):
@@ -233,9 +234,9 @@ class Register(Resource):
             db.session.add(new_user)
             db.session.commit()
             #token
-            return {'message': 'Registro completado'}
+            return jsonify({'success':True})
         else:
-            return {'message': 'El Usuario Ya existe'}
+            return jsonify({'success':False})
                 
 
 
@@ -253,10 +254,57 @@ class Login(Resource):
         
         if login:
             print(login)
-            return jsonify(login)
+            return jsonify({'success':True, 'token': login})
         else:
-            return jsonify({'messeger':'Datos No Validos'})
+            return jsonify({'success':False})
 
+@user.route('/user')
+class UserDetails(Resource):
+    @api.doc(security='apikey')
+    def get(self):
+        auth_header = request.headers.get('Authorization')
+
+        if not auth_header:
+            return jsonify({'message': 'Token de autorización no proporcionado'}), 401
+
+        token_parts = auth_header.split()
+        if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
+            return jsonify({'message': 'Formato de token inválido'}), 401
+
+        token = token_parts[1]
+
+        try:
+            payload = jwt.decode(token, key, algorithms='HS256')
+            user_id = payload.get('id')
+
+            # Obtener detalles del usuario
+            user = User.query.get(user_id)
+            
+            if not user:
+                return {'message': 'Usuario no encontrado'}, 404
+
+            user_data = {
+                'id': user.id,
+                'username': user.username,
+                'firstname': user.firstname,
+                'lastname': user.lastname,
+                'age': user.age,
+                'dni': user.dni,
+                'address': user.address,
+                'phone': user.phone,
+                'email': user.email,
+                'is_admin': user.is_admin,
+                'profile_picture': user.get_profile_picture_url()
+            }
+
+            return {'user': user_data}
+
+        except jwt.ExpiredSignatureError:
+            return {'message': 'Token expirado, inicie sesión nuevamente'}, 401
+        except jwt.InvalidTokenError:
+            return {'message': 'Token inválido'}, 401
+        except Exception as e:
+            return {'message': 'Error en el servidor', 'error': str(e)}, 500
 
 #test
 @user.route('/edit')
